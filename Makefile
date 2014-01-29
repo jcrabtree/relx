@@ -95,17 +95,18 @@ ct: compile clean-common-test-data
 	-pa $(CURDIR)/deps/*/ebin \
 	-logdir $(CURDIR)/logs \
 	-dir $(CURDIR)/test/ \
+	-cover cover.spec \
 	-suite rlx_command_SUITE rlx_discover_SUITE -suite rlx_release_SUITE
 
 test: compile dialyzer eunit ct
 
-$(DEPS_PLT):
+$(DEPS_PLT): compile
 	@echo Building local erts plt at $(DEPS_PLT)
 	@echo
 	$(DIALYZER) --output_plt $(DEPS_PLT) --build_plt \
 	   --apps erts kernel stdlib -r deps
 
-dialyzer: $(DEPS_PLT)
+dialyzer: compile $(DEPS_PLT)
 	$(DIALYZER) --fullpath --plt $(DEPS_PLT) \
 		 -I include -Wrace_conditions -r ./ebin
 

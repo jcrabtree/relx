@@ -55,13 +55,14 @@ Options
 | -u    | --upfrom     | string  |         | The release to upgrade from. Only valid with relup target |
 | -o    | --output-dir | string  | ./      | The output directory for the release |
 | -l    | --lib-dir    | string  |         | Additional dirs to search for OTP apps |
+|       | --system_libs     | string  |  | Path to a Erlang system libs to use |
 | -p    | --path    | string  |         | Additional dirs to add to Erlang code path |
 |       | --default-libs | boolean | true | Whether to use the default system added lib dirs (means you must add them all manually) |
 | -V    | --verbose    | integer | 2       | The verbosity level between 0 and 3 |
 | -a    | --override_app | string | | An app name and a directory to override in the form appname:dir |
 | -c    | --config     | string  | ./relx.config | Config file path |
 |       | --overlay_vars     | string  |  | Path to a file of overlay variables |
-
+| -d    | --dev-mode     | boolean | false | Symlink all applications and configuration into the release instead of copying|
 Wiki
 ----
 

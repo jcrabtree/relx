@@ -105,6 +105,8 @@ get_overlay_vars_from_file(State, OverlayVars) ->
     case rlx_state:get(State, overlay_vars, undefined) of
         undefined ->
             do_overlay(State, OverlayVars);
+        [] ->
+            do_overlay(State, OverlayVars);
         [H | _]=FileNames when is_list(H) ->
             read_overlay_vars(State, OverlayVars, FileNames);
         FileName when is_list(FileName) ->
@@ -132,14 +134,14 @@ merge_overlay_vars(State, FileNames) ->
                             {ok, Terms} ->
                                 lists:ukeymerge(1, lists:ukeysort(1, Terms), Acc);
                             {error, Reason} ->
-                                rlx_log:warn(rlx_state:log(State),
-                                            format_error({unable_to_read_varsfile, FileName, Reason})),
+                                ec_cmd_log:warn(rlx_state:log(State),
+                                                format_error({unable_to_read_varsfile, FileName, Reason})),
                                 Acc
                         end
                 end, [], FileNames).
 
 -spec render_overlay_vars(proplists:proplist(), proplists:proplist(),
-                         proplists:proplist()) ->
+                          proplists:proplist()) ->
                                  {ok, proplists:proplist()} | relx:error().
 render_overlay_vars(OverlayVars, [{Key, Value} | Rest], Acc)
   when erlang:is_list(Value) ->
@@ -194,7 +196,7 @@ generate_release_vars(Release) ->
 -spec generate_app_vars(rlx_app_info:t()) -> AppInfo::tuple().
 generate_app_vars(App) ->
     {rlx_app_info:name(App),
-     [{version, rlx_app_info:vsn_as_string(App)},
+     [{version, rlx_app_info:original_vsn(App)},
       {dir, rlx_app_info:dir(App)},
       {active_dependencies, rlx_app_info:active_deps(App)},
       {library_dependencies, rlx_app_info:library_deps(App)},
@@ -202,7 +204,7 @@ generate_app_vars(App) ->
 
 -spec generate_state_vars(rlx_state:t()) -> proplists:proplist().
 generate_state_vars(State) ->
-    [{log, rlx_log:format(rlx_state:log(State))},
+    [{log, ec_cmd_log:format(rlx_state:log(State))},
      {output_dir, rlx_state:output_dir(State)},
      {target_dir, rlx_state:output_dir(State)},
      {overridden, [AppName || {AppName, _} <- rlx_state:overrides(State)]},

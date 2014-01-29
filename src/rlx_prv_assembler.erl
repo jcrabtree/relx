@@ -41,6 +41,7 @@ init(State) ->
 %% looking for OTP Applications
 -spec do(rlx_state:t()) -> {ok, rlx_state:t()} | relx:error().
 do(State) ->
+    print_dev_mode(State),
     {RelName, RelVsn} = rlx_state:default_configured_release(State),
     Release = rlx_state:get_realized_release(State, RelName, RelVsn),
     OutputDir = rlx_state:output_dir(State),
@@ -114,6 +115,10 @@ format_error({relup_generation_error, CurrentName, UpFromName}) ->
 format_error({relup_generation_warning, Module, Warnings}) ->
     ["Warnings generating relup \s",
      rlx_util:indent(2), Module:format_warning(Warnings)];
+format_error({no_upfrom_release_found, undefined}) ->
+    io_lib:format("No earlier release for relup found", []);
+format_error({no_upfrom_release_found, Vsn}) ->
+    io_lib:format("Upfrom release version (~s) for relup not found", [Vsn]);
 format_error({relup_script_generation_error,
               {relup_script_generation_error, systools_relup,
                {missing_sasl, _}}}) ->
@@ -139,6 +144,15 @@ format_error({tar_generation_error, Module, Errors}) ->
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
+print_dev_mode(State) ->
+    case rlx_state:dev_mode(State) of
+        true ->
+            ec_cmd_log:info(rlx_state:log(State),
+                            "Dev mode enabled, release will be symlinked");
+        false ->
+            ok
+    end.
+
 -spec create_output_dir(file:name()) ->
                                ok | {error, Reason::term()}.
 create_output_dir(OutputDir) ->
@@ -157,14 +171,15 @@ create_output_dir(OutputDir) ->
 copy_app_directories_to_output(State, Release, OutputDir) ->
     LibDir = filename:join([OutputDir, "lib"]),
     ok = ec_file:mkdir_p(LibDir),
-    Apps = rlx_release:application_details(Release),
+    IncludeSrc = rlx_state:include_src(State),
+    Apps = prepare_applications(State, rlx_release:application_details(Release)),
     Result = lists:filter(fun({error, _}) ->
                                    true;
                               (_) ->
                                    false
                            end,
                           lists:flatten(ec_plists:map(fun(App) ->
-                                                              copy_app(LibDir, App)
+                                                              copy_app(LibDir, App, IncludeSrc)
                                                       end, Apps))),
     case Result of
         [E | _] ->
@@ -173,9 +188,17 @@ copy_app_directories_to_output(State, Release, OutputDir) ->
             create_release_info(State, Release, OutputDir)
     end.
 
-copy_app(LibDir, App) ->
+prepare_applications(State, Apps) ->
+    case rlx_state:dev_mode(State) of
+        true ->
+            [rlx_app_info:link(App, true) || App <- Apps];
+        false ->
+            Apps
+    end.
+
+copy_app(LibDir, App, IncludeSrc) ->
     AppName = erlang:atom_to_list(rlx_app_info:name(App)),
-    AppVsn = rlx_app_info:vsn_as_string(App),
+    AppVsn = rlx_app_info:original_vsn(App),
     AppDir = rlx_app_info:dir(App),
     TargetDir = filename:join([LibDir, AppName ++ "-" ++ AppVsn]),
     if
@@ -184,16 +207,16 @@ copy_app(LibDir, App) ->
             %% a release dir
             ok;
         true ->
-            copy_app(App, AppDir, TargetDir)
+            copy_app(App, AppDir, TargetDir, IncludeSrc)
     end.
 
-copy_app(App, AppDir, TargetDir) ->
+copy_app(App, AppDir, TargetDir, IncludeSrc) ->
     remove_symlink_or_directory(TargetDir),
     case rlx_app_info:link(App) of
         true ->
             link_directory(AppDir, TargetDir);
         false ->
-            copy_directory(AppDir, TargetDir)
+            copy_directory(AppDir, TargetDir, IncludeSrc)
     end.
 
 remove_symlink_or_directory(TargetDir) ->
@@ -217,16 +240,21 @@ link_directory(AppDir, TargetDir) ->
             ok
     end.
 
-copy_directory(AppDir, TargetDir) ->
+copy_directory(AppDir, TargetDir, IncludeSrc) ->
     ec_plists:map(fun(SubDir) ->
                           copy_dir(AppDir, TargetDir, SubDir)
                   end, ["ebin",
                         "include",
                         "priv",
-                        "src",
-                        "c_src",
                         "README",
-                        "LICENSE"]).
+                        "LICENSE" |
+                        case IncludeSrc of
+                            true ->
+                                ["src",
+                                 "c_src"];
+                            false ->
+                                []
+                        end]).
 
 copy_dir(AppDir, TargetDir, SubDir) ->
     SubSource = filename:join(AppDir, SubDir),
@@ -274,6 +302,22 @@ write_bin_file(State, Release, OutputDir, RelDir) ->
                                           rlx_release:erts(Release),
                                           ErlOpts);
                     true ->
+                        case rlx_state:get(State, extended_start_script, false) of
+                            true ->
+                                Prefix = code:root_dir(),
+                                ok = ec_file:copy(filename:join([Prefix, "bin", "start_clean.boot"]),
+                                                  filename:join([BinDir, "start_clean.boot"])),
+                                NodeToolFile = nodetool_contents(),
+                                InstallUpgradeFile = install_upgrade_escript_contents(),
+                                NodeTool = filename:join([BinDir, "nodetool"]),
+                                InstallUpgrade = filename:join([BinDir, "install_upgrade.escript"]),
+                                ok = file:write_file(NodeTool, NodeToolFile),
+                                ok = file:write_file(InstallUpgrade, InstallUpgradeFile),
+                                ok = file:change_mode(NodeTool, 8#755),
+                                ok = file:change_mode(InstallUpgrade, 8#755);
+                            false ->
+                                ok
+                        end,
                         extended_bin_file_contents(RelName, RelVsn, rlx_release:erts(Release), ErlOpts)
                 end,
     %% We generate the start script by default, unless the user
@@ -287,24 +331,26 @@ write_bin_file(State, Release, OutputDir, RelDir) ->
             ok = file:write_file(BareRel, StartFile),
             ok = file:change_mode(BareRel, 8#777)
     end,
-    copy_or_generate_vmargs_file(State, RelName, RelDir),
+    copy_or_generate_vmargs_file(State, Release, OutputDir, RelDir),
     copy_or_generate_sys_config_file(State, Release, OutputDir, RelDir).
 
 %% @doc copy vm.args or generate one to releases/VSN/vm.args
--spec copy_or_generate_vmargs_file(rlx_state:t(), string(), file:name()) ->
+-spec copy_or_generate_vmargs_file(rlx_state:t(), rlx_release:t(), file:name(), file:name()) ->
                                               {ok, rlx_state:t()} | relx:error().
 
-copy_or_generate_vmargs_file(State, RelName, RelDir) ->
+copy_or_generate_vmargs_file(State, Release, OutputDir, RelDir) ->
     RelVmargsPath = filename:join([RelDir, "vm.args"]),
     case rlx_state:vm_args(State) of
         undefined ->
+            RelName = erlang:atom_to_list(rlx_release:name(Release)),
             unless_exists_write_default(RelVmargsPath, vm_args_file(RelName));
         ArgsPath ->
             case filelib:is_regular(ArgsPath) of
                 false ->
                     ?RLX_ERROR({vmargs_does_not_exist, ArgsPath});
                 true ->
-                    ec_file:copy(ArgsPath, RelVmargsPath)
+                    copy_or_symlink_config_file(State, Release, OutputDir, RelDir,
+                                                ArgsPath, RelVmargsPath)
             end
     end.
 
@@ -323,13 +369,30 @@ copy_or_generate_sys_config_file(State, Release, OutputDir, RelDir) ->
                 false ->
                     ?RLX_ERROR({config_does_not_exist, ConfigPath});
                 true ->
-                    ok = ec_file:copy(ConfigPath, RelSysConfPath),
-                    include_erts(State, Release, OutputDir, RelDir)
+                    copy_or_symlink_config_file(State, Release, OutputDir, RelDir,
+                                                    ConfigPath, RelSysConfPath)
             end
     end.
 
+%% @doc copy config/sys.config or generate one to releases/VSN/sys.config
+-spec copy_or_symlink_config_file(rlx_state:t(), rlx_release:t(),
+                                  file:name(), file:name(),
+                                  file:name(), file:name()) ->
+                                         {ok, rlx_state:t()} | relx:error().
+copy_or_symlink_config_file(State, Release, OutputDir, RelDir,
+                                ConfigPath, RelConfPath) ->
+    ensure_not_exist(RelConfPath),
+    case rlx_state:dev_mode(State) of
+        true ->
+            ok = file:make_symlink(ConfigPath, RelConfPath);
+        _ ->
+            ok = ec_file:copy(ConfigPath, RelConfPath)
+    end,
+    include_erts(State, Release, OutputDir, RelDir).
+
 %% @doc Optionally add erts directory to release, if defined.
--spec include_erts(rlx_state:t(), rlx_release:t(),  file:name(), file:name()) -> {ok, rlx_state:t()} | relx:error().
+-spec include_erts(rlx_state:t(), rlx_release:t(),  file:name(), file:name()) ->
+                          {ok, rlx_state:t()} | relx:error().
 include_erts(State, Release, OutputDir, RelDir) ->
     case rlx_state:get(State, include_erts, true) of
         true ->
@@ -343,23 +406,10 @@ include_erts(State, Release, OutputDir, RelDir) ->
                 true ->
                     ok = ec_file:mkdir_p(LocalErts),
                     ok = ec_file:copy(ErtsDir, LocalErts, [recursive]),
-                    ok = ec_file:remove(filename:join([LocalErts, "bin", "erl"])),
-                    ok = file:write_file(filename:join([LocalErts, "bin", "erl"]), erl_script(ErtsVersion)),
-                    case rlx_state:get(State, extended_start_script, false) of
-                        true ->
-                            ok = ec_file:copy(filename:join([Prefix, "bin", "start_clean.boot"]),
-                                              filename:join([OutputDir, "bin", "start_clean.boot"])),
-                            NodeToolFile = nodetool_contents(),
-                            InstallUpgradeFile = install_upgrade_escript_contents(),
-                            NodeTool = filename:join([LocalErts, "bin", "nodetool"]),
-                            InstallUpgrade = filename:join([LocalErts, "bin", "install_upgrade.escript"]),
-                            ok = file:write_file(NodeTool, NodeToolFile),
-                            ok = file:write_file(InstallUpgrade, InstallUpgradeFile),
-                            ok = file:change_mode(NodeTool, 8#755),
-                            ok = file:change_mode(InstallUpgrade, 8#755);
-                        false ->
-                            ok
-                    end,
+                    Erl = filename:join([LocalErts, "bin", "erl"]),
+                    ok = ec_file:remove(Erl),
+                    ok = file:write_file(Erl, erl_script(ErtsVersion)),
+                    ok = file:change_mode(Erl, 8#755),
                     make_boot_script(State, Release, OutputDir, RelDir)
             end;
         _ ->
@@ -380,14 +430,14 @@ make_boot_script(State, Release, OutputDir, RelDir) ->
                             systools:make_script(Name, CorrectedOptions)
                     end) of
         ok ->
-            rlx_log:error(rlx_state:log(State),
-                          "release successfully created!"),
+            ec_cmd_log:info(rlx_state:log(State),
+                             "release successfully created!"),
             create_RELEASES(OutputDir, ReleaseFile),
             {ok, State};
         error ->
             ?RLX_ERROR({release_script_generation_error, ReleaseFile});
         {ok, _, []} ->
-            rlx_log:error(rlx_state:log(State),
+            ec_cmd_log:info(rlx_state:log(State),
                           "release successfully created!"),
             create_RELEASES(OutputDir, ReleaseFile),
             {ok, State};
@@ -411,8 +461,9 @@ make_script(Options, RunFun) ->
     end.
 
 make_relup(State, Release) ->
+    Vsn = rlx_state:upfrom(State),
     UpFrom =
-        case rlx_state:upfrom(State) of
+        case Vsn of
             undefined ->
                 get_last_release(State, Release);
             Vsn ->
@@ -420,7 +471,7 @@ make_relup(State, Release) ->
         end,
     case UpFrom of
         undefined ->
-            ?RLX_ERROR(no_upfrom_release_found);
+            ?RLX_ERROR({no_upfrom_release_found, Vsn});
         _ ->
             make_upfrom_script(State, Release, UpFrom)
     end.
@@ -473,15 +524,11 @@ update_tar(State, TempDir, OutputDir, Name, Vsn, ErtsVersion) ->
                         {"bin", filename:join([OutputDir, "bin"])} |
                         case rlx_state:get(State, include_erts, true) of
                             true ->
-                                [{"erts-"++ErtsVersion, filename:join(TempDir, "erts-"++ErtsVersion)},
-                                 {filename:join(["erts-"++ErtsVersion, "bin", "nodetool"]),
-                                  hd(nodetool_contents())},
-                                 {filename:join(["erts-"++ErtsVersion, "bin", "install_upgrade.escript"]),
-                                  hd(install_upgrade_escript_contents())}];
+                                [{"erts-"++ErtsVersion, filename:join(OutputDir, "erts-"++ErtsVersion)}];
                             false ->
                                 []
                         end], [compressed]),
-    rlx_log:info(rlx_state:log(State),
+    ec_cmd_log:info(rlx_state:log(State),
                  "tarball ~s successfully created!~n", [TarFile]),
     ec_file:remove(TempDir, [recursive]),
     {ok, State}.
@@ -503,7 +550,7 @@ make_upfrom_script(State, Release, UpFrom) ->
                silent],
     CurrentRel = strip_rel(rlx_release:relfile(Release)),
     UpFromRel = strip_rel(rlx_release:relfile(UpFrom)),
-    rlx_log:debug(rlx_state:log(State),
+    ec_cmd_log:debug(rlx_state:log(State),
                   "systools:make_relup(~p, ~p, ~p, ~p)",
                   [CurrentRel, UpFromRel, UpFromRel, Options]),
     case make_script(Options,
@@ -511,14 +558,14 @@ make_upfrom_script(State, Release, UpFrom) ->
                              systools:make_relup(CurrentRel, [UpFromRel], [UpFromRel], CorrectOptions)
                      end)  of
         ok ->
-            rlx_log:error(rlx_state:log(State),
+            ec_cmd_log:error(rlx_state:log(State),
                           "relup from ~s to ~s successfully created!",
                           [UpFromRel, CurrentRel]),
             {ok, State};
         error ->
             ?RLX_ERROR({relup_script_generation_error, CurrentRel, UpFromRel});
         {ok, RelUp, _, []} ->
-            rlx_log:error(rlx_state:log(State),
+            ec_cmd_log:error(rlx_state:log(State),
                           "relup successfully created!"),
             write_relup_file(State, Release, RelUp),
             {ok, State};
@@ -542,7 +589,7 @@ get_up_release(State, Release, Vsn) ->
     try
         ec_dictionary:get({Name, Vsn}, rlx_state:realized_releases(State))
     catch
-        throw:notfound ->
+        throw:not_found ->
             undefined
     end.
 
@@ -582,7 +629,7 @@ get_code_paths(Release, OutDir) ->
     LibDir = filename:join(OutDir, "lib"),
     [filename:join([LibDir,
                     erlang:atom_to_list(rlx_app_info:name(App)) ++ "-" ++
-                        rlx_app_info:vsn_as_string(App), "ebin"]) ||
+                        rlx_app_info:original_vsn(App), "ebin"]) ||
         App <- rlx_release:application_details(Release)].
 
 unless_exists_write_default(Path, File) ->
@@ -591,6 +638,15 @@ unless_exists_write_default(Path, File) ->
             ok;
         false ->
             ok = file:write_file(Path, File)
+    end.
+
+-spec ensure_not_exist(file:name()) -> ok.
+ensure_not_exist(RelConfPath) ->
+    case ec_file:exists(RelConfPath) of
+        false ->
+            ok;
+        _ ->
+            ec_file:remove(RelConfPath)
     end.
 
 erl_script(ErtsVsn) ->
@@ -731,7 +787,7 @@ REMSH_NAME=`echo $NAME_ARG | awk '{print $2}'`
 
 # Note the `date +%s`, used to allow multiple remsh to the same node transparently
 REMSH_NAME_ARG=\"$REMSH_TYPE remsh`date +%s`@`echo $REMSH_NAME | awk -F@ '{print $2}'`\"
-REMSH_REMSH_ARG=\"-remsh $REMSH_NAME\"
+REMSH_REMSH_ARG=\"-remsh $REMSH_NAME -boot start_clean\"
 
 # Extract the target cookie
 COOKIE_ARG=`grep '^-setcookie' $VMARGS_PATH`
@@ -754,7 +810,7 @@ cd $ROOTDIR
 REMSH=\"$BINDIR/erl $REMSH_NAME_ARG $REMSH_REMSH_ARG $COOKIE_ARG\"
 
 # Setup command to control the node
-NODETOOL=\"$BINDIR/escript $BINDIR/nodetool $NAME_ARG $COOKIE_ARG\"
+NODETOOL=\"$BINDIR/escript $ROOTDIR/bin/nodetool $NAME_ARG $COOKIE_ARG\"
 
 # Check the first argument for instructions
 case \"$1\" in
@@ -886,7 +942,7 @@ case \"$1\" in
         node_name=`echo $NAME_ARG | awk '{print $2}'`
         erlang_cookie=`echo $COOKIE_ARG | awk '{print $2}'`
 
-        exec $BINDIR/escript $BINDIR/install_upgrade.escript $REL_NAME $node_name $erlang_cookie $2
+        exec $BINDIR/escript $ROOTDIR/bin/install_upgrade.escript $REL_NAME $node_name $erlang_cookie $2
         ;;
 
     console|console_clean|console_boot)
@@ -894,8 +950,8 @@ case \"$1\" in
         # however, for debugging, sometimes start_clean.boot is useful.
         # For e.g. 'setup', one may even want to name another boot script.
         case \"$1\" in
-            console)        [ -f $REL_DIR/$REL_NAME.boot ] && BOOTFILE=$REL_NAME || BOOTFILE=start ;;
-            console_clean)  BOOTFILE=start_clean ;;
+            console)        [ -f $REL_DIR/$REL_NAME.boot ] && BOOTFILE=$REL_DIR/$REL_NAME || BOOTFILE=$REL_DIR/start ;;
+            console_clean)  BOOTFILE=$ROOTDIR/bin/start_clean ;;
             console_boot)
                 shift
                 BOOTFILE=\"$1\"
@@ -905,7 +961,7 @@ case \"$1\" in
         # Setup beam-required vars
         EMU=beam
         PROGNAME=`echo $0 | sed 's/.*\\///'`
-        CMD=\"$BINDIR/erlexec -boot $REL_DIR/$BOOTFILE -mode embedded -config $CONFIG_PATH -args_file $VMARGS_PATH\"
+        CMD=\"$BINDIR/erlexec -boot $BOOTFILE -env ERL_LIBS $REL_DIR/lib -config $CONFIG_PATH -args_file $VMARGS_PATH\"
         export EMU
         export PROGNAME
 
@@ -930,7 +986,7 @@ case \"$1\" in
         # Setup beam-required vars
         EMU=beam
         PROGNAME=`echo $0 | sed 's/.*\\///'`
-        CMD=\"$BINDIR/erlexec $FOREGROUNDOPTIONS -boot $REL_DIR/$BOOTFILE -config $CONFIG_PATH -args_file $VMARGS_PATH\"
+        CMD=\"$BINDIR/erlexec $FOREGROUNDOPTIONS -boot $REL_DIR/$BOOTFILE -mode embedded -config $CONFIG_PATH -args_file $VMARGS_PATH\"
         export EMU
         export PROGNAME
 
@@ -972,7 +1028,7 @@ main([RelName, NodeName, Cookie, VersionArg]) ->
                           [ReleasePackage], ?TIMEOUT) of
                 {ok, Vsn} ->
                     ?INFO(\"Unpacked successfully: ~p~n\", [Vsn]),
-                    install_and_permafy(TargetNode, Vsn);
+                    install_and_permafy(TargetNode, RelName, Vsn);
                 {error, UnpackReason} ->
                     print_existing_versions(TargetNode),
                     ?INFO(\"Unpack failed: ~p~n\",[UnpackReason]),
@@ -981,13 +1037,13 @@ main([RelName, NodeName, Cookie, VersionArg]) ->
         old ->
             %% no need to unpack, has been installed previously
             ?INFO(\"Release ~s is marked old, switching to it.~n\",[Version]),
-            install_and_permafy(TargetNode, Version);
+            install_and_permafy(TargetNode, RelName, Version);
         unpacked ->
             ?INFO(\"Release ~s is already unpacked, now installing.~n\",[Version]),
-            install_and_permafy(TargetNode, Version);
+            install_and_permafy(TargetNode, RelName, Version);
         current -> %% installed and in-use, just needs to be permanent
             ?INFO(\"Release ~s is already installed and current. Making permanent.~n\",[Version]),
-            permafy(TargetNode, Version);
+            permafy(TargetNode, RelName, Version);
         permanent ->
             ?INFO(\"Release ~s is already installed, and set permanent.~n\",[Version])
     end;
@@ -997,7 +1053,7 @@ main(_) ->
 parse_version(V) when is_list(V) ->
     hd(string:tokens(V,\"/\")).
 
-install_and_permafy(TargetNode, Vsn) ->
+install_and_permafy(TargetNode, RelName, Vsn) ->
     case rpc:call(TargetNode, release_handler, check_install_release, [Vsn], ?TIMEOUT) of
         {ok, _OtherVsn, _Desc} ->
             ok;
@@ -1008,7 +1064,7 @@ install_and_permafy(TargetNode, Vsn) ->
     case rpc:call(TargetNode, release_handler, install_release, [Vsn], ?TIMEOUT) of
         {ok, _, _} ->
             ?INFO(\"Installed Release: ~s~n\", [Vsn]),
-            permafy(TargetNode, Vsn),
+            permafy(TargetNode, RelName, Vsn),
             ok;
         {error, {no_such_release, Vsn}} ->
             VerList =
@@ -1019,8 +1075,10 @@ install_and_permafy(TargetNode, Vsn) ->
             erlang:halt(2)
     end.
 
-permafy(TargetNode, Vsn) ->
+permafy(TargetNode, RelName, Vsn) ->
     ok = rpc:call(TargetNode, release_handler, make_permanent, [Vsn], ?TIMEOUT),
+    file:copy(filename:join([\"bin\", RelName++\"-\"++Vsn]),
+              filename:join([\"bin\", RelName])),
     ?INFO(\"Made release permanent: ~p~n\", [Vsn]),
     ok.
 
@@ -1170,7 +1228,6 @@ append_node_suffix(Name, Suffix) ->
         [Node] ->
             list_to_atom(lists:concat([Node, Suffix, os:getpid()]))
     end.
-
 
 %%
 %% Given a string or binary, parse it into a list of terms, ala file:consult/0

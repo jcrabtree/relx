@@ -27,6 +27,7 @@
          log/1,
          actions/1,
          output_dir/1,
+         output_dir/2,
          lib_dirs/1,
          add_lib_dirs/2,
          overrides/1,
@@ -61,6 +62,10 @@
          put/3,
          caller/1,
          caller/2,
+         dev_mode/1,
+         dev_mode/2,
+         include_src/1,
+         include_src/2,
          upfrom/1,
          format/1,
          format/2]).
@@ -71,7 +76,7 @@
              cmd_args/0,
              action/0]).
 
--record(state_t, {log :: rlx_log:t(),
+-record(state_t, {log :: ec_cmd_log:t(),
                   root_dir :: file:name(),
                   caller :: caller(),
                   actions=[] :: [action()],
@@ -88,6 +93,8 @@
                   skip_apps=[] :: [AppName::atom()],
                   configured_releases :: releases(),
                   realized_releases :: releases(),
+                  dev_mode=false :: boolean(),
+                  include_src=true :: boolean(),
                   upfrom :: string() | binary() | undefined,
                   config_values :: ec_dictionary:dictionary(Key::atom(),
                                                             Value::term())}).
@@ -118,10 +125,11 @@ new(PropList, Targets)
     {ok, Root} = file:get_cwd(),
     Caller = proplists:get_value(caller, PropList, api),
     State0 =
-        #state_t{log = proplists:get_value(log, PropList, rlx_log:new(error, Caller)),
+        #state_t{log = proplists:get_value(log, PropList, ec_cmd_log:new(error, Caller)),
                  output_dir=proplists:get_value(output_dir, PropList, ""),
                  lib_dirs=[to_binary(Dir) || Dir <- proplists:get_value(lib_dirs, PropList, [])],
                  config_file=proplists:get_value(config, PropList, undefined),
+                 dev_mode = proplists:get_value(dev_mode, PropList),
                  actions = Targets,
                  caller = Caller,
                  goals=proplists:get_value(goals, PropList, []),
@@ -138,7 +146,11 @@ new(PropList, Targets)
                            default_libs,
                            proplists:get_value(default_libs, PropList, true)),
 
-    rlx_state:put(create_logic_providers(State1),
+    State2 = rlx_state:put(create_logic_providers(State1),
+                           system_libs,
+                           proplists:get_value(system_libs, PropList, undefined)),
+
+    rlx_state:put(create_logic_providers(State2),
                   overlay_vars,
                   proplists:get_value(overlay_vars, PropList, [])).
 
@@ -167,13 +179,17 @@ skip_apps(State, SkipApps) ->
     State#state_t{skip_apps=SkipApps}.
 
 %% @doc get the current log state for the system
--spec log(t()) -> rlx_log:t().
+-spec log(t()) -> ec_cmd_log:t().
 log(#state_t{log=LogState}) ->
     LogState.
 
 -spec output_dir(t()) -> file:name().
 output_dir(#state_t{output_dir=OutDir}) ->
     OutDir.
+
+-spec output_dir(t(), Directory::file:filename()) -> t().
+output_dir(State, Directory) ->
+    State#state_t{output_dir=Directory}.
 
 -spec lib_dirs(t()) -> [file:name()].
 lib_dirs(#state_t{lib_dirs=LibDir}) ->
@@ -205,7 +221,7 @@ vm_args(#state_t{vm_args=VmArgs}) ->
 
 -spec vm_args(t(), file:filename()) -> t().
 vm_args(State, VmArgs) ->
-	State#state_t{vm_args=VmArgs}.
+    State#state_t{vm_args=VmArgs}.
 
 -spec sys_config(t()) -> file:filename() | undefined.
 sys_config(#state_t{sys_config=SysConfig}) ->
@@ -313,6 +329,22 @@ caller(#state_t{caller=Caller}) ->
 caller(S, Caller) ->
     S#state_t{caller=Caller}.
 
+-spec dev_mode(t()) -> boolean().
+dev_mode(#state_t{dev_mode=DevMode}) ->
+    DevMode.
+
+-spec dev_mode(t(), boolean()) -> t().
+dev_mode(S, DevMode) ->
+    S#state_t{dev_mode=DevMode}.
+
+-spec include_src(t()) -> boolean().
+include_src(#state_t{include_src=IncludeSrc}) ->
+    IncludeSrc.
+
+-spec include_src(t(), boolean()) -> t().
+include_src(S, IncludeSrc) ->
+    S#state_t{include_src=IncludeSrc}.
+
 -spec upfrom(t()) -> string() | binary() | undefined.
 upfrom(#state_t{upfrom=UpFrom}) ->
     UpFrom.
@@ -330,7 +362,7 @@ format(#state_t{log=LogState, output_dir=OutDir, lib_dirs=LibDirs,
     Values1 = ec_dictionary:to_list(Values0),
     [rlx_util:indent(Indent),
      <<"state(">>, erlang:atom_to_list(Caller), <<"):\n">>,
-     rlx_util:indent(Indent + 2), <<"log: ">>, rlx_log:format(LogState), <<",\n">>,
+     rlx_util:indent(Indent + 2), <<"log: ">>, ec_cmd_log:format(LogState), <<",\n">>,
      rlx_util:indent(Indent + 2), "config file: ", rlx_util:optional_to_string(ConfigFile), "\n",
      rlx_util:indent(Indent + 2), "goals: \n",
      [[rlx_util:indent(Indent + 3), rlx_depsolver:format_constraint(Goal), ",\n"] || Goal <- Goals],
@@ -371,7 +403,7 @@ to_binary(Dir)
 -include_lib("eunit/include/eunit.hrl").
 
 new_test() ->
-    LogState = rlx_log:new(error),
+    LogState = ec_cmd_log:new(error),
     RCLState = new([{log, LogState}], [release]),
     ?assertMatch(LogState, log(RCLState)).
 

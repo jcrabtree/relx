@@ -81,7 +81,7 @@ main(Args) ->
 %% @param LibDirs - The library dirs that should be used for the system
 %% @param OutputDir - The directory where the release should be built to
 %% @param Configs - The list of config files for the system
--spec do(atom(), string(), [goal()], [file:name()], rlx_log:log_level(),
+-spec do(atom(), string(), [goal()], [file:name()], ec_cmd_log:log_level(),
          [file:name()], file:name() | undefined) ->
                   ok | error() | {ok, rlx_state:t()}.
 do(RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, Config) ->
@@ -99,8 +99,8 @@ do(RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, Config) ->
 %% @param OutputDir - The directory where the release should be built to
 %% @param Configs - The list of config files for the system
 -spec do(file:name(), atom(), string(), [goal()], [file:name()],
-           rlx_log:log_level(), [file:name()], file:name() | undefined) ->
-                  ok | error() | {ok, rlx_state:t()}.
+         ec_cmd_log:log_level(), [file:name()], file:name() | undefined) ->
+                ok | error() | {ok, rlx_state:t()}.
 do(RootDir, RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, Configs) ->
     do(RootDir, RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, [], Configs).
 
@@ -116,8 +116,8 @@ do(RootDir, RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, Configs) ->
 %% @param Overrides - A list of overrides for the system
 %% @param Configs - The list of config files for the system
 -spec do(file:name(), atom(), string(), [goal()], [file:name()],
-           rlx_log:log_level(), [file:name()], [{atom(), file:name()}], file:name() | undefined) ->
-                  ok | error() | {ok, rlx_state:t()}.
+         ec_cmd_log:log_level(), [file:name()], [{atom(), file:name()}], file:name() | undefined) ->
+                ok | error() | {ok, rlx_state:t()}.
 do(RootDir, RelName, RelVsn, Goals, LibDirs, LogLevel, OutputDir, Overrides, Config) ->
     do([{relname, RelName},
         {relvsn, RelVsn},
@@ -197,11 +197,14 @@ opt_spec_list() ->
       "Whether to use the default system added lib dirs (means you must add them all manually). Default is true"},
      {log_level, $V, "verbose", {integer, 2},
       "Verbosity level, maybe between 0 and 3"},
+     {dev_mode, $d, "dev-mode", {boolean, false},
+      "Symlink the applications and configuration into the release instead of copying"},
      {override_app, $a, "override_app", string,
       "Provide an app name and a directory to override in the form <appname>:<app directory>"},
      {config, $c, "config", {string, ""}, "The path to a config file"},
      {overlay_vars, undefined, "overlay_vars", string, "Path to a file of overlay variables"},
-     {version, $v, "version", undefined, "Print relx version"},
+     {system_libs, undefined, "system_libs", string, "Path to dir of Erlang system libs"},
+     {version, undefined, "version", undefined, "Print relx version"},
      {root_dir, $r, "root", string, "The project root directory"}].
 
 -spec format_error(Reason::term()) -> string().
@@ -221,11 +224,11 @@ format_error({error, {Module, Reason}}) ->
 %% internal api
 %%============================================================================
 run_relx_process(State) ->
-    rlx_log:info(rlx_state:log(State), "Starting relx build process ..."),
-    rlx_log:debug(rlx_state:log(State),
-                  fun() ->
-                          rlx_state:format(State)
-                  end),
+    ec_cmd_log:info(rlx_state:log(State), "Starting relx build process ..."),
+    ec_cmd_log:debug(rlx_state:log(State),
+                     fun() ->
+                             rlx_state:format(State)
+                     end),
     run_providers(State).
 
 %% @doc for now the 'config' provider is special in that it generates the
@@ -269,16 +272,16 @@ run_providers(ConfigProvider, Providers, State0) ->
 run_provider(_Provider, Error = {error, _}) ->
     Error;
 run_provider(Provider, {ok, State0}) ->
-    rlx_log:debug(rlx_state:log(State0), "Running provider ~p~n",
-                  [rlx_provider:impl(Provider)]),
+    ec_cmd_log:debug(rlx_state:log(State0), "Running provider ~p~n",
+                     [rlx_provider:impl(Provider)]),
     case rlx_provider:do(Provider, State0) of
         {ok, State1} ->
-            rlx_log:debug(rlx_state:log(State0), "Provider successfully run: ~p~n",
-                          [rlx_provider:impl(Provider)]),
+            ec_cmd_log:debug(rlx_state:log(State0), "Provider successfully run: ~p~n",
+                             [rlx_provider:impl(Provider)]),
             {ok, State1};
         E={error, _} ->
-            rlx_log:debug(rlx_state:log(State0), "Provider (~p) failed with: ~p~n",
-                          [rlx_provider:impl(Provider), E]),
+            ec_cmd_log:debug(rlx_state:log(State0), "Provider (~p) failed with: ~p~n",
+                             [rlx_provider:impl(Provider), E]),
             E
     end.
 

@@ -105,7 +105,6 @@ parent_dir([_H], Acc) ->
 parent_dir([H | T], Acc) ->
     parent_dir(T, [H | Acc]).
 
-
 -spec load_config(file:filename(), rlx_state:t()) ->
                          {ok, rlx_state:t()} | relx:error().
 load_config(ConfigFile, State) ->
@@ -130,7 +129,7 @@ load_terms({paths, Paths}, {ok, State}) ->
 load_terms({lib_dirs, Dirs}, {ok, State}) ->
     State2 =
         rlx_state:add_lib_dirs(State,
-                               [list_to_binary(filename:absname(Dir)) || Dir <- Dirs]),
+                               [list_to_binary(Dir) || Dir <- rlx_util:wildcard_paths(Dirs)]),
     {ok, State2};
 load_terms({providers, Providers0}, {ok, State0}) ->
     Providers1 = gen_providers(Providers0, State0),
@@ -153,6 +152,22 @@ load_terms({skip_apps, SkipApps0}, {ok, State0}) ->
     {ok, rlx_state:skip_apps(State0, SkipApps0)};
 load_terms({overrides, Overrides0}, {ok, State0}) ->
     {ok, rlx_state:overrides(State0, Overrides0)};
+load_terms({dev_mode, DevMode}, {ok, State0}) ->
+    {ok, rlx_state:dev_mode(State0, DevMode)};
+load_terms({include_src, IncludeSrc}, {ok, State0}) ->
+    {ok, rlx_state:include_src(State0, IncludeSrc)};
+load_terms({release, {RelName, Vsn, {extend, RelName2}}, Applications}, {ok, State0}) ->
+    Release0 = rlx_release:new(RelName, Vsn),
+    ExtendRelease = rlx_state:get_configured_release(State0, RelName2, Vsn),
+    Applications1 = rlx_release:goals(ExtendRelease),
+    case rlx_release:goals(Release0,
+                          lists:umerge(lists:usort(Applications),
+                                      lists:usort(Applications1))) of
+        E={error, _} ->
+            E;
+        {ok, Release1} ->
+            {ok, rlx_state:add_configured_release(State0, Release1)}
+        end;
 load_terms({release, {RelName, Vsn}, Applications}, {ok, State0}) ->
     Release0 = rlx_release:new(RelName, Vsn),
     case rlx_release:goals(Release0, Applications) of
@@ -174,10 +189,13 @@ load_terms({vm_args, VmArgs}, {ok, State}) ->
     {ok, rlx_state:vm_args(State, filename:absname(VmArgs))};
 load_terms({sys_config, SysConfig}, {ok, State}) ->
     {ok, rlx_state:sys_config(State, filename:absname(SysConfig))};
+load_terms({output_dir, OutputDir}, {ok, State}) ->
+    {ok, rlx_state:output_dir(State, filename:absname(OutputDir))};
 load_terms({overlay_vars, OverlayVars}, {ok, State}) ->
     CurrentOverlayVars = rlx_state:get(State, overlay_vars),
-    NewOverlayVars = lists:umerge(lists:usort(OverlayVars), lists:usort(CurrentOverlayVars)),
-    {ok, rlx_state:put(State, overlay_vars, NewOverlayVars)};
+    NewOverlayVars0 = list_of_overlay_vars_files(OverlayVars),
+    NewOverlayVars1 = lists:umerge(lists:usort(NewOverlayVars0), lists:usort(CurrentOverlayVars)),
+    {ok, rlx_state:put(State, overlay_vars, NewOverlayVars1)};
 load_terms({Name, Value}, {ok, State})
   when erlang:is_atom(Name) ->
     {ok, rlx_state:put(State, Name, Value)};
@@ -195,3 +213,12 @@ gen_providers(Providers, State) ->
                    (_, E={_, {error, _}}) ->
                         E
                 end, {[], {ok, State}}, Providers).
+
+list_of_overlay_vars_files(undefined) ->
+    [];
+list_of_overlay_vars_files([]) ->
+    [];
+list_of_overlay_vars_files([H | _]=FileNames) when erlang:is_list(H) ->
+    FileNames;
+list_of_overlay_vars_files(FileName) when is_list(FileName) ->
+    [FileName].

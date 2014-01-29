@@ -137,7 +137,7 @@ create_log(Opts, Acc) ->
     LogLevel = proplists:get_value(log_level, Opts, 0),
     if
         LogLevel >= 0, LogLevel =< 3 ->
-            create_goals(Opts, [{log, rlx_log:new(LogLevel, command_line)} | Acc]);
+            create_goals(Opts, [{log, ec_cmd_log:new(LogLevel, command_line)} | Acc]);
         true ->
             ?RLX_ERROR({invalid_log_level, LogLevel})
     end.
@@ -223,11 +223,12 @@ create_output_dir(Opts, Acc) ->
 create_lib_dirs(Opts, Acc) ->
     Dirs = proplists:get_all_values(lib_dir, Opts) ++
         proplists:get_value(lib_dirs, Opts, []),
-    case check_lib_dirs(Dirs) of
+    ExpDirs = rlx_util:wildcard_paths(Dirs),
+    case check_lib_dirs(ExpDirs) of
         Error = {error, _} ->
             Error;
         ok ->
-            create_root_dir(Opts, [{lib_dirs, [filename:absname(Dir) || Dir <- Dirs]} | Acc])
+            create_root_dir(Opts, [{lib_dirs, ExpDirs} | Acc])
     end.
 
 -spec create_root_dir([getopt:option()], rlx_state:cmd_args()) ->
@@ -252,7 +253,13 @@ create_disable_default_libs(Opts, Acc) ->
                                  {ok, rlx_state:cmd_args()} | relx:error().
 create_overlay_vars(Opts, Acc) ->
     OverlayVars = proplists:get_all_values(overlay_vars, Opts),
-    create_upfrom(Opts,  [{overlay_vars, OverlayVars} | Acc]).
+    create_system_libs(Opts,  [{overlay_vars, OverlayVars} | Acc]).
+
+-spec create_system_libs([getopt:option()], rlx_state:cmd_args()) ->
+                                 {ok, rlx_state:cmd_args()} | relx:error().
+create_system_libs(Opts, Acc) ->
+    SystemLibs = proplists:get_value(system_libs, Opts, undefined),
+    create_upfrom(Opts,  [{system_libs, SystemLibs} | Acc]).
 
 -spec create_upfrom([getopt:option()], rlx_state:cmd_args()) ->
     {ok, rlx_state:cmd_args()} | relx:error().
@@ -294,8 +301,14 @@ create_paths(Opts, Acc) ->
             Error;
         ok ->
             code:add_pathsa([filename:absname(Path) || Path <- Dirs]),
-            {ok, Acc}
+            create_dev_mode(Opts, Acc)
     end.
+
+-spec create_dev_mode([getopt:option()], rlx_state:cmd_args()) ->
+                           {ok, rlx_state:cmd_args()} | relx:error().
+create_dev_mode(Opts, Acc) ->
+    DevMode = proplists:get_value(dev_mode, Opts, false),
+    {ok, [{dev_mode, DevMode} | Acc]}.
 
 -spec check_lib_dirs([string()]) -> ok | relx:error().
 check_lib_dirs([]) ->
